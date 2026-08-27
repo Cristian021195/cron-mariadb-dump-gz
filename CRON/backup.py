@@ -175,6 +175,14 @@ def es_error_de_permisos(stderr_output: str) -> bool:
     salida = stderr_output.lower()
     return any(patron in salida for patron in PERMISSION_ERROR_PATTERNS)
 
+##### REGEX PARA REMOVER EL DEFINER (MariaDB 10.11.19 no tiene --skip-definer) #####
+# Trabaja sobre bytes porque el stdout de mysqldump se lee en modo binario.
+# Equivalente a: sed -E 's/DEFINER=`[^`]+`@`[^`]+`//g'
+DEFINER_REGEX = re.compile(rb"DEFINER=`[^`]*`@`[^`]*`\s*")
+
+def quitar_definer(linea: bytes) -> bytes:
+    return DEFINER_REGEX.sub(b"", linea)
+
 ##### FUNCIÓN PARA CORRER EL DUMP E IR GENERANDO UN COMPRIMIDO #####
 def dump_database_gz(nombre: str, defaults_file: Path, destino_gz: Path) -> bool:
     """
@@ -196,11 +204,10 @@ def dump_database_gz(nombre: str, defaults_file: Path, destino_gz: Path) -> bool
         )
 
         with gzip.open(destino_gz, "wb") as gz_out:
-            while True:
-                chunk = proceso.stdout.read(1024 * 1024)  # 1 MB por lectura
-                if not chunk:
-                    break
-                gz_out.write(chunk)
+            # Se itera línea por línea (en vez de chunks fijos de 1 MB) para
+            # que el regex de DEFINER nunca quede cortado por un límite de chunk.
+            for linea in proceso.stdout:
+                gz_out.write(quitar_definer(linea))
 
         proceso.wait()
         stderr_output = proceso.stderr.read().decode(errors="replace").strip()
@@ -238,15 +245,22 @@ def dump_database_structure(nombre: str, defaults_file: Path, destino_sql: Path)
     ]
 
     try:
+        proceso = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
+
         with open(destino_sql, "wb") as sql_out:
-            resultado = subprocess.run(cmd, stdout=sql_out, stderr=subprocess.PIPE)
+            for linea in proceso.stdout:
+                sql_out.write(quitar_definer(linea))
+
+        proceso.wait()
+        stderr_output = proceso.stderr.read().decode(errors="replace").strip()
     except OSError as e:
         logger.error(f"No se pudo ejecutar mysqldump (estructura) para la base '{nombre}': {e}")
         destino_sql.unlink(missing_ok=True)
         return False
 
-    if resultado.returncode != 0:
-        stderr_output = resultado.stderr.decode(errors="replace").strip()
+    if proceso.returncode != 0:
         if es_error_de_permisos(stderr_output):
             logger.error(
                 f"Permisos insuficientes del usuario '{MYSQL_USER}' sobre la "

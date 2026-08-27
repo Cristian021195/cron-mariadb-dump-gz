@@ -30,5 +30,9 @@ Se le complemente el nombre con la terminación _test o similar (por coincidenci
 Y así es que mantiene actualizada una base de datos de testing.
 
 
+## TEMPORALIDAD DE CRONS
+- backup.py: `33 3 * * * /bin/python3 /home/n782216/BACKUPS_DATABASES/CRON/backup.py`
+- restore.py `0 7 * * 0 /bin/python3 /home/n782216/BACKUPS_DATABASES/CRON/restore.py`
+
 ## OTRAS ACOTACIONES
 Ambos scripts tienen acceso al filesystem y aplican comandos similares para la exportación e importación de testing.

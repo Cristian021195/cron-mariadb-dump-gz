@@ -16,7 +16,6 @@ import os
 import re
 import sys
 import gzip
-import random
 import logging
 import tempfile
 import subprocess
@@ -278,10 +277,10 @@ def cleanup_old_backups(nombre: str, directorio: Path, mantener: int) -> None:
     """
     Conserva solo los `mantener` backups más recientes de `nombre`
     dentro de `directorio` (según fecha de modificación) y borra el resto.
-    Matchea exactamente el patrón <nombre>_YYYY-MM-DD_NNN.sql.gz para no
+    Matchea exactamente el patrón <nombre>_YYYY-MM-DD.sql.gz para no
     confundir, por ejemplo, 'clientes' con 'clientes_reportes'.
     """
-    patron = re.compile(rf"^{re.escape(nombre)}_\d{{4}}-\d{{2}}-\d{{2}}_\d{{3}}\.sql\.gz$")
+    patron = re.compile(rf"^{re.escape(nombre)}_\d{{4}}-\d{{2}}-\d{{2}}\.sql\.gz$")
 
     try:
         archivos = [f for f in directorio.iterdir() if f.is_file() and patron.match(f.name)]
@@ -306,9 +305,8 @@ print("\nIniciando backup de bases de PRODUCCIÓN...")
 try:
     for nombre in BASES_PROD:
         fecha = datetime.now().strftime("%Y-%m-%d")
-        numero_random = str(random.randint(0, 999)).zfill(3)
 
-        destino_gz = DATA_AND_STRUCTURE_DIR / f"{nombre}_{fecha}_{numero_random}.sql.gz"
+        destino_gz = DATA_AND_STRUCTURE_DIR / f"{nombre}_{fecha}.sql.gz"
         destino_estructura = STRUCTURE_DIR / f"{nombre}.sql"
 
         print(f"  (*) Backupeando {nombre} ...")

@@ -3,24 +3,24 @@
 ## ESTRUCTURA DE CARPETAS
 - `/CRON` Carpeta que contiene .env con las credenciales del usuario de backups, más el script main.py con el algoritmo de backup más /logs en caso de errores  
 - `/STRUCTURE` Aqui se guardan los backups `<bd>.sql.gz` de unicamente las estructuras de las bases de datos sin datos
-- `/DATA_AND_STRUCTURE` Aqui se guardan los backups `<bd>_<fecha>_<rand>.sql.gz` propiamente dichos los cuales pueden importarse directamente 
+- `/DATA_AND_STRUCTURE` Aqui se guardan los backups `<bd>_<fecha>.sql.gz` propiamente dichos los cuales pueden importarse directamente 
 - `/RUTINAS_TRIGGERS_EVENTOS` Es código sql ajustado a las bases de datos que le corresponden en sus respectivos ambientes /PROD y /TEST siempre verificar antes de ejecutar
 - `/RUTINAS_TRIGGERS_EVENTOS` Es código sql ajustado a las bases de datos que le corresponden en sus respectivos ambientes /PROD y /TEST siempre verificar antes de ejecutar
 
 ## FUNCIONAMIENTO DEL CRON
 El cron básicamente consta de:
-- El usuario `n782216_backups` encargado de gestionar backups. Recordar dar permisos ante nuevas bases de datos
+- El usuario `backups` encargado de gestionar backups. Recordar dar permisos ante nuevas bases de datos
 - Una consulta que trae todas las bases de datos en las que tiene permisos
 - Una lógica de filtrado para bases de datos de sistema, producción y testing
 - Realizado de dump + compresión gzip para bases de datos unicamente de producción
 - Guardado de dichos backups solo hasta 3 copias del mismo (o sea 72 hs) para evitar ocupar espacio de más
-- Temporalidad: se ejecuta todos los días a las 3:33 AM `/bin/python3 /home/n782216/BACKUPS_DATABASES/CRON/main.py`
+- Temporalidad: se ejecuta todos los días a las 3:33 AM `/bin/python3 /home/<host>/BACKUPS_DATABASES/CRON/backup.py`
 
 ```mermaid
 flowchart TD
 
     A["Cron (03:33 AM)"] --> B["Ejecutar main.py"]
-    B --> C["Conectar como usuario n782216_backups"]
+    B --> C["Conectar como usuario backups"]
     C --> D["Obtener listado de bases de datos con permisos"]
 
     D --> E{"¿Quedan bases por procesar?"}
@@ -43,5 +43,5 @@ flowchart TD
 
     E -->|No| O["Finalizar proceso"]
 
-    P["Usuario n782216_backups"] -.-> C
+    P["Usuario backups"] -.-> C
 ```

@@ -1,16 +1,20 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # coding=UTF-8
 """
 restore.py
 
 Toma el ÚLTIMO backup .sql.gz generado por backup.py para cada base de
-PRODUCCIÓN (DATA_AND_STRUCTURE/<nombre>_YYYY-MM-DD_NNN.sql.gz) y lo importa
+PRODUCCIÓN (DATA_AND_STRUCTURE/<nombre>_YYYY-MM-DD.sql.gz) y lo importa
 en su base de testing correspondiente (<nombre>_<sufijo>), que debe existir
 previamente en el servidor.
 
-Pensado para correr por cron una vez por semana (domingos). Por defecto el
-script se niega a correr si hoy no es domingo; usar --force para saltarse
-ese chequeo (útil para pruebas manuales).
+Pensado para correr por cron una vez por semana (domingos), momento en que
+casi no hay I/O sobre las bases. Las importaciones se corren en paralelo
+(2-3 simultáneas por defecto, configurable con --workers o la variable de
+entorno RESTORE_WORKERS), ya que importar suele demorar más que exportar.
+
+Por defecto el script se niega a correr si hoy no es domingo; usar --force
+para saltarse ese chequeo (útil para pruebas manuales).
 """
 
 import os
@@ -20,9 +24,15 @@ import gzip
 import tempfile
 import logging
 import argparse
+import threading
 import subprocess
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# Se toma apenas arranca el proceso, antes de cualquier chequeo que pueda
+# cortar la ejecución (día de semana, .env faltante, etc.).
+INICIO_EJECUCION = datetime.now()
 
 ##### VERIFICACIÓN DE DEPENDENCIAS #####
 
@@ -49,6 +59,16 @@ parser.add_argument(
     "--force",
     action="store_true",
     help="Ejecutar aunque hoy no sea domingo (para pruebas manuales).",
+)
+parser.add_argument(
+    "--workers",
+    type=int,
+    default=None,
+    help=(
+        "Cantidad de importaciones a correr en simultáneo (mínimo 1, máximo "
+        "según RESTORE_MAX_WORKERS -default 6-). "
+        "Default: variable de entorno RESTORE_WORKERS, o 3 si no está definida."
+    ),
 )
 args = parser.parse_args()
 
@@ -94,6 +114,14 @@ console_handler = logging.StreamHandler(sys.stdout)
 console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
 
+
+def formatear_duracion(segundos: float) -> str:
+    """Convierte segundos a un texto tipo H:MM:SS, redondeado al segundo."""
+    return str(timedelta(seconds=round(segundos)))
+
+
+logger.info(f"Inicio de restore.py: {INICIO_EJECUCION.strftime('%Y-%m-%d %H:%M:%S')}")
+
 ##### VARIABLES DE CONEXIÓN Y CLASIFICACIÓN DE BASES #####
 
 TEST_SUFFIXES = (
@@ -118,17 +146,32 @@ if not MYSQL_USER or not MYSQL_PASS:
     logger.error("Faltan MYSQL_USER y/o MYSQL_PASS en .env")
     sys.exit("!! Faltan MYSQL_USER y/o MYSQL_PASS en .env")
 
+# CLI (--workers) tiene prioridad sobre la variable de entorno RESTORE_WORKERS.
+# Se limita a un rango razonable [1, MAX_WORKERS] para evitar que alguien
+# tipee un número enorme (por CLI o en el .env) y sature el servidor de
+# MySQL con demasiadas importaciones simultáneas.
+MAX_WORKERS = int(os.environ.get("RESTORE_MAX_WORKERS", "6"))
+WORKERS = args.workers if args.workers is not None else int(os.environ.get("RESTORE_WORKERS", "3"))
+if WORKERS < 1:
+    logger.warning(f"WORKERS={WORKERS} es inválido, se ajusta a 1.")
+    WORKERS = 1
+elif WORKERS > MAX_WORKERS:
+    logger.warning(f"WORKERS={WORKERS} supera el máximo permitido ({MAX_WORKERS}), se ajusta a {MAX_WORKERS}.")
+    WORKERS = MAX_WORKERS
+
+# Evita que los print() de hilos distintos se entrelacen en la consola.
+print_lock = threading.Lock()
+
 ##### PATRÓN DE NOMBRE DE ARCHIVO (mismo formato que genera backup.py) #####
-# <nombre>_YYYY-MM-DD_NNN.sql.gz
-FILENAME_PATTERN = re.compile(r"^(?P<nombre>.+)_\d{4}-\d{2}-\d{2}_\d{3}\.sql\.gz$")
+# <nombre>_YYYY-MM-DD.sql.gz
+FILENAME_PATTERN = re.compile(r"^(?P<nombre>.+)_\d{4}-\d{2}-\d{2}\.sql\.gz$")
 
 
 def encontrar_ultimo_backup_por_base(directorio: Path) -> dict:
     """
     Recorre el directorio de backups y arma un diccionario
     { nombre_base_produccion: Path_al_archivo_mas_reciente }.
-    "Más reciente" se decide por fecha de modificación del archivo,
-    no por el número random del nombre (ese no indica orden).
+    "Más reciente" se decide por fecha de modificación del archivo.
     """
     ultimos = {}  # nombre -> (mtime, Path)
 
@@ -263,6 +306,39 @@ def importar_backup_gz(nombre_test: str, archivo_gz: Path, defaults_file: Path) 
     return True
 
 
+##### WRAPPER THREAD-SAFE PARA CORRER RESTAURACIONES EN PARALELO #####
+def restaurar_una_base(nombre_test: str, nombre_prod: str, archivo_gz: Path, defaults_file: Path) -> bool:
+    inicio = datetime.now()
+
+    with print_lock:
+        print(f"  (*) [{inicio.strftime('%H:%M:%S')}] Restaurando {archivo_gz.name} -> {nombre_test} ...")
+
+    try:
+        ok = importar_backup_gz(nombre_test, archivo_gz, defaults_file)
+    except Exception as e:
+        logger.error(f"Error inesperado al restaurar '{nombre_test}': {e}")
+        ok = False
+
+    fin = datetime.now()
+    duracion = formatear_duracion((fin - inicio).total_seconds())
+
+    with print_lock:
+        if ok:
+            print(
+                f"      OK -> {nombre_test} actualizada desde {archivo_gz.name} "
+                f"[{fin.strftime('%H:%M:%S')}, duración {duracion}]"
+            )
+        else:
+            print(f"      FALLÓ -> {nombre_test} (ver log para el detalle) [duración {duracion}]")
+
+    logger.info(
+        f"'{nombre_test}': inicio {inicio.strftime('%H:%M:%S')} - fin {fin.strftime('%H:%M:%S')} "
+        f"- duración {duracion} - resultado: {'OK' if ok else 'FALLÓ'}"
+    )
+
+    return ok
+
+
 ##### EJECUCIÓN #####
 
 defaults_file = make_mysql_defaults_file()
@@ -301,9 +377,9 @@ try:
     for nombre_test, nombre_prod in bases_testing:
         print(f"  - {nombre_test} <- {nombre_prod}")
 
-    print(f"\nIniciando restauración desde backups disponibles...")
-    restauraciones = 0
+    print(f"\nIniciando restauración desde backups disponibles ({WORKERS} en simultáneo)...")
 
+    a_importar = []
     for nombre_test, nombre_prod in bases_testing:
         archivo_gz = ultimos_backups.get(nombre_prod)
         if archivo_gz is None:
@@ -312,19 +388,30 @@ try:
                 f"'{nombre_prod}', asociada a '{nombre_test}'. Se omite."
             )
             continue
+        a_importar.append((nombre_test, nombre_prod, archivo_gz))
 
-        print(f"  (*) Restaurando {archivo_gz.name} -> {nombre_test} ...")
+    restauraciones = 0
 
-        try:
-            ok = importar_backup_gz(nombre_test, archivo_gz, defaults_file)
-        except Exception as e:
-            logger.error(f"Error inesperado al restaurar '{nombre_test}': {e}")
-            ok = False
+    with ThreadPoolExecutor(max_workers=WORKERS) as executor:
+        futuros = {
+            executor.submit(restaurar_una_base, nombre_test, nombre_prod, archivo_gz, defaults_file): nombre_test
+            for nombre_test, nombre_prod, archivo_gz in a_importar
+        }
+        for futuro in as_completed(futuros):
+            nombre_test = futuros[futuro]
+            try:
+                if futuro.result():
+                    restauraciones += 1
+            except Exception as e:
+                logger.error(f"Excepción no controlada restaurando '{nombre_test}': {e}")
 
-        if ok:
-            restauraciones += 1
-            print(f"      OK -> {nombre_test} actualizada desde {archivo_gz.name}")
-
-    print(f"\nRestauración de bases de TESTING finalizada ({restauraciones}/{len(bases_testing)}).")
+    print(f"\nRestauración de bases de TESTING finalizada ({restauraciones}/{len(a_importar)}).")
 finally:
     defaults_file.unlink(missing_ok=True)
+
+    FIN_EJECUCION = datetime.now()
+    duracion_total = formatear_duracion((FIN_EJECUCION - INICIO_EJECUCION).total_seconds())
+    logger.info(
+        f"Fin de restore.py: {FIN_EJECUCION.strftime('%Y-%m-%d %H:%M:%S')} "
+        f"(duración total: {duracion_total})"
+    )

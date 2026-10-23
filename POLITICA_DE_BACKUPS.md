@@ -79,6 +79,19 @@ Recordar verificar siempre luego de una importación:
 
 *IMPORTANTE* tener en cuenta que no todas las rutinas estan presentes ya que muchas se crearon con otro usuario, entonces el full admin debería proporcionarnos dicha exportación
 
+## Creación de backup manual e importación
+
+### Creación
+Para casos especificos cuando queramos generar un backup comprimido en un determinado momento por fuera del tiempo determinado por el cron `mysqldump -u <mysql user> -p<mysql pass> <bd> | gzip > <ruta>/backup.sql.gz`
+
+### Restauración de backup manual
+Para casos especificos cuando queramos importar un backup comprimido en un determinado momento por fuera del tiempo determinado por el cron `gunzip -c <ruta>/backup.sql.gz | mysql -u <bd> -p <mysql_user>`
+
+Ante ambos casos recordar bien: 
+    - Contar con el usuario y contraseña con los permisos adecuados
+    - Verificar el tipo de compresión y paquete que lo ejecutara
+    - Verificar que la carpeta y el archivo exista
+    - Para backups NO comprimidos, solo quitar el pipe de gunzip y asignar el archivo `< <ruta>/backup.sql` al final del comando
 
 ## Aclaraciones finales
 
